@@ -1,0 +1,627 @@
+from indra.sources import trips
+
+import pandas as pd
+
+from indra.sources import sparser
+
+from indra.literature import pubmed_client
+
+from indra.sources import signor
+
+import requests
+
+import time
+
+import re
+
+from sklearn.model_selection import train_test_split
+
+from sklearn.linear_model import LogisticRegression
+
+from sklearn.ensemble import RandomForestClassifier
+
+from sklearn.svm import SVC
+
+from sklearn.model_selection import GridSearchCV, StratifiedKFold
+
+from sklearn.preprocessing import StandardScaler
+
+from sklearn.pipeline import Pipeline
+
+from sklearn.svm import SVC
+
+from sklearn.metrics import classification_report
+
+from xgboost import XGBClassifier
+
+from sklearn.model_selection import GridSearchCV
+
+from sklearn.metrics import classification_report
+
+from sklearn.utils import resample
+
+from sklearn.metrics import f1_score
+
+import numpy as np
+
+from sklearn.model_selection import cross_val_score
+
+import random
+
+from imblearn.over_sampling import SMOTE
+
+from imblearn.pipeline import Pipeline
+
+import matplotlib.pyplot as plt
+
+import shap
+# Project Summary
+
+This project develops a robust machine learning pipeline to validate protein-protein interactions (PPIs) automatically extracted from biomedical literature using NLP (via INDRA/TRIPS/Sparser). The workflow combines **linguistic and biological domain knowledge** to maximize the biological credibility of predicted interactions.
+
+**Key steps and methods:**
+
+- **Data extraction:** Mechanistic interaction statements are mined from the literature using the INDRA system (TRIPS, Sparser) and curated databases such as SIGNOR. PubMed abstracts are also processed for additional evidence.
+- **Data integration and filtering:** Interactions are filtered to include only high-confidence protein pairs and standardized to match the requirements for STING validation.
+- **Biological validation:** Each interaction is cross-referenced with the STING database (API), Reactome pathway database, and BioGRID PPI database to add reference-based support features.
+- **Feature engineering:** Both linguistic cues (e.g., negation, conditions, mutation mention, evidence length, text redundancy, directionality) and biological support indicators (Reactome, BioGRID) are encoded as input features.
+- **Train-test split:** The dataset is split using stratified sampling to ensure balanced evaluation.
+- **Class imbalance correction:** SMOTE oversampling is integrated into all model training pipelines to address the highly imbalanced nature of the data.
+- **Model selection:** Four major machine learning algorithms are used and hyperparameter-tuned via nested cross-validation:
+    - Logistic Regression (LASSO)
+    - Random Forest
+    - Support Vector Machine (SVM)
+    - XGBoost (gradient boosting)
+- **Evaluation:** Model performance is measured on a held-out test set and via cross-validation and bootstrap, reporting F1-score, precision, recall, and robustness.
+- **Feature importance:** The importance of linguistic and biological features is assessed and visualized (including SHAP values for XGBoost).
+- **Simulation and robustness:** Synthetic interaction pairs are generated for hypothesis testing, and model robustness is evaluated by perturbing key features in the test data.
+- **Interpretation:** All results are summarized to highlight both strengths and limitations of the current ML approach for biological interaction validation.
+
+### TRIPS processor can be used to extract statements about biological entities from the system
+**TRIPS = The Rochester Interactive Planning System**
+
+TRIPS is a natural language processing (NLP) system originally developed by the University of Rochester and later by Columbia University. Its aim is to extract structured, machine-interpretable information from text written in human language.
+
+TRIPS is also being applied to the processing of biological texts in the INDRA project, where, for example, biological interactions are being detected in scientific articles, it is a language processing component of the INDRA system.
+
+
+The TRIPS processor produces the following statement:
+
+    Type: activation
+
+    Subject: EGFR
+
+    Object: RAS
+
+    Evidence: Text of the original sentence
+
+This example clearly illustrates how a sentence in natural language is transformed into a structured, machine-processable statement:
+# example
+sentence = 'EGFR activates RAS'
+tp = trips.process_text(sentence)
+
+# view extracted statements
+for stmt in tp.statements:
+    print(stmt)
+Creating CSV files from the extracted statements
+# extract information from statement examples
+ex_data = [] #example data
+for stmt in tp.statements:
+    subj = stmt.agent_list()[0].name if stmt.agent_list()[0] else None
+    obj = stmt.agent_list()[1].name if stmt.agent_list()[1] else None
+    stmt_type = stmt.__class__.__name__
+    evidence_text = stmt.evidence[0].text if stmt.evidence else None
+    ex_data.append({
+        'subject': subj,
+        'object': obj,
+        'statement_type': stmt_type,
+        'evidence': evidence_text
+    })
+
+# dataframe creation and CSV export
+df = pd.DataFrame(ex_data)
+df.to_csv('/Users/mendo/OneDrive/Desktop/Fruzs/indra_example_statements.csv', index=False)
+
+Loading articles from the PubMed site, using the INDRA pubmed_client module.
+# retrieve identifiers for a given keyword
+pmids = pubmed_client.get_ids('EGFR', retmax=2) # retrieve 2 articles
+
+all_statements = []
+for pmid in pmids:
+    abstract = pubmed_client.get_abstract(pmid) # retrieve abstract
+    if abstract:
+        rp = sparser.process_text(abstract)
+        if rp and rp.statements:
+            all_statements.extend(rp.statements)
+# extract information from statements
+# create a DataFrame to store the extracted information
+st_data = [] #statement data
+for stmt in all_statements:
+    subj = stmt.agent_list()[0].name if stmt.agent_list()[0] else None
+    obj = stmt.agent_list()[1].name if stmt.agent_list()[1] else None
+    stmt_type = stmt.__class__.__name__
+    evidence_text = stmt.evidence[0].text if stmt.evidence else None
+    st_data.append({
+        'subject': subj,
+        'object': obj,
+        'statement_type': stmt_type,
+        'evidence': evidence_text
+    })
+
+st_df = pd.DataFrame(st_data)
+
+st_df.to_csv('/Users/mendo/OneDrive/Desktop/Fruzs/indra_statements.csv', index=False)
+### Extracting Mechanistic Statements from the SIGNOR Database
+In this step, we use the INDRA framework to automatically download and process biological interaction data from the SIGNOR database. The signor.process_from_web() function retrieves all curated mechanistic statements (such as protein activations and inhibitions) and converts them into standardized INDRA Statement objects. We then extract relevant information — the subject, object, interaction type, and evidence text — from each statement and save the results into a structured DataFrame. Finally, the data is exported to a CSV file for further filtering and analysis.
+# SIGNOR 
+print("Letöltés SIGNOR-ból...")
+signor_processor = signor.process_from_web()
+print("Letöltés kész.")
+
+# statements
+print("Állítások feldolgozása...")
+statements = signor_processor.statements
+print(f"{len(statements)} állítás feldolgozva.")
+
+#dataframe
+data = []
+for stmt in statements:
+    agents = stmt.agent_list()
+    subj = agents[0].name if len(agents) > 0 and agents[0] else None
+    obj = agents[1].name if len(agents) > 1 and agents[1] else None
+    stmt_type = stmt.__class__.__name__
+    evidence = stmt.evidence[0].text if stmt.evidence else None
+
+    data.append({
+        'subject': subj,
+        'object': obj,
+        'statement_type': stmt_type,
+        'evidence': evidence
+    })
+
+df_S = pd.DataFrame(data)
+df_S.to_csv('/Users/mendo/OneDrive/Desktop/Fruzs/signor_statements.csv', index=False)
+print(f"{len(df_S)} állítás mentve SIGNOR-ból.")
+
+filter for proteins (subject and/or object type) and for activation and inhibition as interaction types, for it to be comparable with STING data (this part is flexible, we can do any other filtreing needed for a different project)
+df_protein= pd.read_csv('/Users/mendo/OneDrive/Desktop/Fruzs/signor_statements.csv')
+# define valid protein name filter
+def is_valid_protein(name):
+    if not isinstance(name, str):
+        return False
+    name = name.strip()
+    # exclude numeric-only, too short/long, or non-alphanumeric names
+    return (
+        name.isalnum() and
+        any(c.isalpha() for c in name) and
+        2 <= len(name) <= 20
+    )
+
+# filter for activation/inhibition
+df_protein = df_protein[
+    df_protein['statement_type'].isin(['Activation', 'Inhibition']) &
+    df_protein['subject'].apply(is_valid_protein) &
+    df_protein['object'].apply(is_valid_protein)
+]
+
+# save 
+output_path = '/Users/mendo/OneDrive/Desktop/Fruzs/signor_statements_filtered_proteins.csv'
+df_protein.to_csv(output_path, index=False)
+
+# size
+print(f"Filtered DataFrame size: {df_protein.shape}")
+STING load
+The following part iterates through the df_protein dataframe and queries the STING API for each subject–object protein pair. If STING confirms an interaction, it records the confidence score (between 0 and 1). It adds two new columns: sting_score for the returned value and sting_supported, a boolean indicating whether an interaction was found.
+let's see 1000 rows from the filtered SIGNOR database, so the running time is under 10 minutes (chunks can be a good solution too)
+df_subset = df_protein.sample(n=1000, random_state=42)
+
+output_path2 = '/Users/mendo/OneDrive/Desktop/Fruzs/signor_statements_1000filtered_proteins.csv'
+df_subset.to_csv(output_path2, index=False)
+
+# STING API query
+def query_string_api(protein1, protein2, species=9606):
+    """Query STING database for interaction between two proteins."""
+    base_url = "https://string-db.org/api/json/network"
+    query = f"{protein1}%0A{protein2}"  # line-separated
+    url = f"{base_url}?identifiers={query}&species={species}"
+
+    try:
+        response = requests.get(url)
+        if response.status_code == 200:
+            data = response.json()
+            for item in data:
+                # match both directions
+                if (
+                    {item['preferredName_A'], item['preferredName_B']} ==
+                    {protein1, protein2}
+                ):
+                    return item.get("score", None)
+        return None
+    except Exception as e:
+        print(f"Error for {protein1}-{protein2}: {e}")
+        return None
+
+# apply STING API to filtered dataframe
+sting_scores = []
+for idx, row in df_subset.iterrows():
+    p1, p2 = row['subject'], row['object']
+    score = query_string_api(p1, p2)
+    sting_scores.append(score)
+    #time.sleep(1)
+
+# add to dataframe
+df_subset['sting_score'] = sting_scores
+df_subset['sting_supported'] = df_subset['sting_score'].notna()
+
+# export updated file
+output_path_sting = '/Users/mendo/OneDrive/Desktop/Fruzs/signor_with_sting_1000.csv'
+df_subset.to_csv(output_path_sting, index=False)
+
+print(f"STING scores appended. File saved to:\n{output_path_sting}")
+
+The signor_with_sting_1000.csv dataset contains 1000 interaction statements with the following key columns:
+
+subject and object: the two interacting proteins
+
+statement_type: the interaction type (Activation or Inhibition)
+
+evidence: the original text snippet supporting the interaction
+
+sting_score: the confidence score retrieved from the STING database (if available)
+
+sting_supported: a binary indicator showing whether the interaction is supported by STING (True/False)
+
+Feature engineering has now been completed, including automatic extraction of linguistic and biological cues from the evidence text (e.g., presence of negation, conditions, mutation mentions, ligand references, redundancy, and interaction direction). The dataset is now ready for the machine learning pipeline steps: training, evaluation, and interpretation.
+### Feature engineering
+df_fe = df_subset.copy() # copying the dataframe to avoid modifying the original
+
+# define the features to be extracted
+# 1. contains_negation
+df_fe["contains_negation"] = df_fe["evidence"].str.contains(
+    r"\b(not|fails to|cannot|does not|did not|is not|was not|no)\b", 
+    flags=re.IGNORECASE, na=False
+)
+
+# 2. has_condition
+df_fe["has_condition"] = df_fe["evidence"].str.contains(
+    r"\b(only if|only when|unless|when|provided that|in the presence of|as long as|if)\b",
+    flags=re.IGNORECASE, na=False
+)
+
+# 3. mentions_mutation
+df_fe["mentions_mutation"] = df_fe["evidence"].str.contains(
+    r"\b(mutated|mutation|variant|mutant|altered)\b",
+    flags=re.IGNORECASE, na=False
+)
+
+# 4. ligand_mentioned
+ligand_keywords = ["EGF", "insulin", "cytokine", "growth factor", "ligand", "TGF", "TNF", "hormone"]
+ligand_pattern = r"\b(" + "|".join(ligand_keywords) + r")\b"
+df_fe["ligand_mentioned"] = df_fe["evidence"].str.contains(ligand_pattern, flags=re.IGNORECASE, na=False)
+
+# 5. evidence_length
+df_fe["evidence_length"] = df_fe["evidence"].str.len().fillna(0)
+
+# 6. redundant
+pair_counts = df_fe.groupby(["subject", "object"]).size()
+df_fe["redundant"] = df_fe.apply(lambda row: pair_counts[(row["subject"], row["object"])] > 1, axis=1)
+
+# 7. subject and object name lengths
+df_fe["subject_length"] = df_fe["subject"].str.len()
+df_fe["object_length"] = df_fe["object"].str.len()
+
+# 8. do subject and object share the same prefix (first 3 characters)
+df_fe["protein_pair_same_prefix"] = df_fe.apply(
+    lambda row: row["subject"][:3] == row["object"][:3], axis=1
+)
+
+# 9. is subject/object string found in the evidence text
+df_fe["subject_in_evidence"] = df_fe.apply(
+    lambda row: row["subject"].lower() in str(row["evidence"]).lower(), axis=1
+)
+df_fe["object_in_evidence"] = df_fe.apply(
+    lambda row: row["object"].lower() in str(row["evidence"]).lower(), axis=1
+)
+
+# 10. is subject mentioned before object in the evidence text
+df_fe["subject_object_order_correct"] = df_fe.apply(
+    lambda row: (
+        row["subject"] in str(row["evidence"]) and
+        row["object"] in str(row["evidence"]) and
+        str(row["evidence"]).index(row["subject"]) < str(row["evidence"]).index(row["object"])
+    ) if isinstance(row["evidence"], str) and row["subject"] in row["evidence"] and row["object"] in row["evidence"] else False,
+    axis=1
+)
+
+# 11. binary encoding of statement type (Activation = 1, Inhibition = 0)
+df_fe["statement_type_binary"] = df_fe["statement_type"].str.lower().map({
+    "activation": 1, "inhibition": 0
+}).fillna(0).astype(int)
+
+
+The following two features implement biological content-based validation features for the extracted interactions.
+
+    - the first feature (reactome) checks whether the subject–object protein pair occurs in the Reactome pathway database: the interaction is described as part of a well-curated biological pathway, which significantly increases its credibility as a real mechanism
+
+    - the second feature (biogrid) verifies whether the interaction is supported by the BioGRID protein–protein interaction database: if the pair is present in BioGRID, it indicates that the connection has been experimentally observed and documented in the literature
+
+By adding these two features, the machine learning model can prioritize and validate those statements that are both linguistically and biologically substantiated.
+# 12. 
+reactome_db = pd.read_csv("/Users/mendo/OneDrive/Desktop/Fruzs/ReactomePathwaysRelations.txt", sep="\t", header=None, names=["subject", "object", "relationship"])
+reactome_edges = set(zip(reactome_db['subject'], reactome_db['object']))
+
+def in_reactome_pathway(subject, object_):
+    return int((subject, object_) in reactome_edges)
+# 13.
+biogrid_db = pd.read_csv("/Users/mendo/OneDrive/Desktop/Fruzs/interactions", sep="\t", low_memory=False)
+biogrid_edges = set(zip(biogrid_db['source'], biogrid_db['target']))
+
+def is_biogrid_ppi(subject, object_):
+    return int((subject, object_) in biogrid_edges or (object_, subject) in biogrid_edges)
+
+### Train-Test split
+# define feature matrix X and target y
+feature_columns = [
+    "contains_negation", "has_condition", "mentions_mutation",
+    "ligand_mentioned", "evidence_length", "redundant",
+    "subject_length", "object_length", "protein_pair_same_prefix",
+    "subject_in_evidence", "object_in_evidence", "subject_object_order_correct",
+    "statement_type_binary"
+]
+
+X = df_fe[feature_columns]
+y = df_fe["sting_supported"].astype(int)
+#train/test split
+
+X = df_fe[feature_columns]
+y = df_fe["sting_supported"].astype(int)
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y, random_state=42)
+
+### Model training: Logistic Regression, Random Forest, SVM
+### 1. Logistic regression with L1 regularization (LASSO)
+
+logreg_pipe = Pipeline([
+    ('smote', SMOTE(random_state=42)),
+    ('clf', LogisticRegression(class_weight='balanced', random_state=42))
+])
+logreg_params = {
+    'clf__penalty': ['l1', 'l2'],
+    'clf__C': [0.01, 0.1, 1, 10, 100],
+    'clf__solver': ['liblinear']
+}
+logreg_grid = GridSearchCV(logreg_pipe, logreg_params, cv=5, scoring='f1')
+logreg_grid.fit(X_train, y_train)
+best_logreg = logreg_grid.best_estimator_
+
+print("Best Logistic Regression:", logreg_grid.best_params_)
+### 2. Random forest
+
+rf = RandomForestClassifier(n_estimators=100,  class_weight='balanced', random_state=42)
+rf.fit(X_train, y_train)
+# random forest hyperparameter tuning
+rf_pipe = Pipeline([
+    ('smote', SMOTE(random_state=42)),
+    ('clf', RandomForestClassifier(class_weight='balanced', random_state=42))
+])
+param_grid_rf = {
+    'clf__n_estimators': [100, 200],
+    'clf__max_depth': [5, 10],
+    'clf__min_samples_split': [2, 5]
+}
+gs_rf = GridSearchCV(rf_pipe, param_grid_rf, cv=10, scoring='f1')
+gs_rf.fit(X_train, y_train)
+best_rf = gs_rf.best_estimator_
+print("Best Random Forest:", gs_rf.best_params_)
+### 3. SVM
+svm = SVC(kernel='linear', probability=True,  class_weight='balanced', random_state=42)
+svm.fit(X_train, y_train)
+svm_pipe = Pipeline([
+    ('smote', SMOTE(random_state=42)),
+    ('clf', SVC(class_weight='balanced', probability=True, random_state=42))
+])
+param_grid_svm = {'clf__C': [0.01, 0.1, 1, 10], 'clf__kernel': ['linear', 'rbf']}
+gs_svm = GridSearchCV(svm_pipe, param_grid_svm, cv=5, scoring='f1')
+gs_svm.fit(X_train, y_train)
+best_svm = gs_svm.best_estimator_
+
+
+print("Best SVM:", gs_svm.best_params_)
+### Predicitons using the optimalized models
+# predictions from best models
+y_pred_logreg = best_logreg.predict(X_test)
+y_pred_rf = best_rf.predict(X_test)
+y_pred_svm = best_svm.predict(X_test)
+
+# evaluation
+print("\nLogistic Regression Report:")
+print(classification_report(y_test, y_pred_logreg))
+
+print("\nRandom Forest Report:")
+print(classification_report(y_test, y_pred_rf))
+
+print("\nSVM Report:")
+print(classification_report(y_test, y_pred_svm))
+
+In this project:
+
+**Class 1** = The interaction is supported by STING, meaning it is likely biologically valid.
+
+**Class 0** = The interaction is not supported by STING, meaning it may be incorrect or uncertain.
+
+The goal is to train a model that can predict, based on NLP output, whether an interaction is likely to be STING-supported (class 1) or not (class 0).
+The Logistic Regression model achieved "perfect precision" for class 0 (unsupported interactions), but this is misleading — it only recognized 3% of those cases. It predicted nearly everything as class 1. The overall accuracy was 56%, but the model is clearly biased.
+
+The Random Forest model performed slightly better at recognizing both classes. It achieved 11% recall for class 0 and 91% for class 1, with a balanced overall F1-score of around 0.44. While this is more balanced than Logistic Regression, it still misses many unsupported interactions.
+
+The SVM model predicted almost everything as class 1, completely ignoring class 0. This resulted in an F1-score of 0.71 for class 1, but 0.00 for class 0. Although the accuracy was 55%, the model lacks reliability for distinguishing between valid and invalid interactions.
+Because all three basic models struggle to recognize both classes — especially the unsupported (class 0) cases — let's introduce more advanced algorithms such as XGBoost to improve prediction performance and class balance.
+### XGBoost
+XGBoost builds a sequence of decision trees, where each new tree tries to correct the mistakes made by the previous ones. Instead of relying on a single model, it combines the output of many trees to make a final prediction ( =boosting). This helps to improve accuracy (and reduce overfitting). 
+
+In the next part, class imbalance is first calculated and used to adjust the model’s internal weighting. A grid of hyperparameters is defined, including values for tree depth, learning rate, and subsampling. Then grid search is used to test many combinations of these parameters through 5-fold cross-validation, selecting the model that performs best based on the F1-score. The best-performing model is then used to make predictions on the test set, and its performance is evaluated with metrics like precision, recall, and F1-score.
+xgb_pipe = Pipeline([
+    ('smote', SMOTE(random_state=42)),
+    ('clf', xgb.XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42))
+])
+param_grid_xgb = {
+    'clf__n_estimators': [100, 200],
+    'clf__max_depth': [3, 5],
+    'clf__learning_rate': [0.01, 0.1],
+    'clf__subsample': [0.8, 1],
+    'clf__colsample_bytree': [0.8, 1]
+}
+gs_xgb = GridSearchCV(xgb_pipe, param_grid_xgb, cv=10, scoring='f1')
+gs_xgb.fit(X_train, y_train)
+best_xgb = gs_xgb.best_estimator_
+y_pred_best_xgb = best_xgb.predict(X_test)
+f1 = f1_score(y_test, y_pred_best_xgb)
+
+print(f"F1-score (test set): {f1:.3f}")
+print("Best Parameters:", gs_xgb.best_params_)
+print(classification_report(y_test, y_pred_best_xgb))
+importances = best_xgb.named_steps['clf'].feature_importances_
+feature_names = X_train.columns
+for name, imp in sorted(zip(feature_names, importances), key=lambda x: -x[1]):
+    print(f"{name}: {imp:.3f}")
+
+# Opció: vizuális plot
+plt.figure(figsize=(8,5))
+plt.barh(feature_names, importances)
+plt.xlabel("Feature importance")
+plt.title("XGBoost Feature Importances")
+plt.gca().invert_yaxis()
+plt.show()
+
+#SHAP values
+model = best_xgb.named_steps['clf']
+explainer = shap.TreeExplainer(model)
+shap_values = explainer.shap_values(X_test)
+
+
+shap.summary_plot(shap_values, X_test, feature_names=feature_names)
+The optimized XGBoost model achieved an overall accuracy of **50%**. It performed well on class 1 (STING-supported interactions) with **79% recall** and **0.63 F1-score**, but struggled with class 0 (unsupported interactions), reaching only **14% recall** and **0.20 F1-score**. This indicates the model is still biased toward predicting interactions as valid, and has difficulty identifying false or unsupported ones.
+
+### Cross-Validation and Bootstrap Evaluation
+
+10 fold cv and F1 score
+# X and y should include all selected features, as before
+cv_scores = cross_val_score(
+    best_xgb,         # or xgb_model, ha best_xgb GridSearch után jött létre
+    X, y,
+    cv=10,
+    scoring='f1'
+)
+
+print("Cross-validated F1 scores (10-fold):", cv_scores)
+print("Mean F1:", cv_scores.mean())
+print("Standard deviation:", cv_scores.std())
+In each round of cross-validation, the model was retrained on 90% of the data and then evaluated on the remaining 10%. The F1-scores in each round ranged between 0.68 and 0.74. The average F1-score was 0.71, meaning the model shows reliable and balanced performance in both precision and recall. The standard deviation was only 0.021, which indicates the model’s performance is stable and does not vary much depending on the data split.
+
+bootstrap and F1 score
+n_iterations = 1000
+boot_f1_scores = []
+
+# Use test set as base for bootstrapping
+for i in range(n_iterations):
+    # resample X_test and y_test with replacement
+    X_bs, y_bs = resample(X_test, y_test, replace=True, random_state=42 + i)
+    y_pred_bs = best_xgb.predict(X_bs)
+    f1 = f1_score(y_bs, y_pred_bs)
+    boot_f1_scores.append(f1)
+
+boot_f1_scores = np.array(boot_f1_scores)
+print("Bootstrap mean F1-score:", boot_f1_scores.mean())
+print("Bootstrap 95% CI: [{:.3f}, {:.3f}]".format(
+    np.percentile(boot_f1_scores, 2.5), np.percentile(boot_f1_scores, 97.5)))
+
+The **bootstrap mean F1-score** is 0.72, meaning that when repeatedly sampling from the test set, the model’s average F1-score remains high. The **95% confidence interval** for the F1-score is \[0.665, 0.767], showing that the model’s performance is consistently strong and would likely fall within this range if tested on new samples.
+
+### Extended Analysis
+
+The next part will include two advanced analyses: first, a robustness test where selected features in the test data are randomly perturbed to measure how stable the model’s predictions are; and second, a hypothesis simulation that generates new, realistic protein-protein interaction pairs and uses the model to predict which of them are likely to be biologically valid. The output will show both the prediction stability (robustness) and a ranked list of the most promising new interactions according to the model.
+# copy test set for perturbation
+X_test_perturbed = X_test.copy()
+
+# randomly choose 10% of the indices to perturb
+n_perturb = int(0.1 * len(X_test))
+perturb_indices = np.random.choice(X_test.index, size=n_perturb, replace=False)
+
+# flip 'statement_type_binary' (0->1, 1->0) for those indices
+X_test_perturbed.loc[perturb_indices, 'statement_type_binary'] = \
+    1 - X_test_perturbed.loc[perturb_indices, 'statement_type_binary']
+
+# original and perturbed predictions
+y_pred_orig = best_xgb.predict(X_test)
+y_pred_perturbed = best_xgb.predict(X_test_perturbed)
+
+# robustness
+robustness = np.mean(y_pred_orig == y_pred_perturbed)
+print(f"Prediction robustness (fraction unchanged): {robustness:.3f}")
+The robustness score of 1.00 means the model’s predictions did not change at all after the perturbation, suggesting that this specific feature has little or no influence on the model’s decisions.
+
+The following part generates 100 new, random protein-protein interaction pairs by selecting unique subjects and objects from the existing dataset and randomly assigning each pair a relationship type (Activation or Inhibition). For each synthetic interaction, all required features are set to reasonable default values. The trained model then predicts the probability that each synthetic interaction would be supported by STING. The results are sorted by predicted probability, and the top high-confidence interactions are printed and exported to a CSV file for further analysis.
+
+# filter only positive (STING-supported) rows for realistic feature sampling
+positive_rows = df_fe[df_fe['sting_supported'] == 1]
+
+subjects = positive_rows['subject'].unique()
+objects = positive_rows['object'].unique()
+statement_types = positive_rows['statement_type_binary'].unique()
+
+n_new = 100  # number of synthetic interactions to generate
+
+synthetic_data = []
+for _ in range(n_new):
+    subj = random.choice(subjects)
+    obj = random.choice(objects)
+    if subj == obj:
+        continue  # skip self-interactions
+    stype = random.choice(statement_types)
+    row = {
+        'contains_negation': int(np.random.rand() < positive_rows['contains_negation'].mean()),
+        'has_condition': int(np.random.rand() < positive_rows['has_condition'].mean()),
+        'mentions_mutation': int(np.random.rand() < positive_rows['mentions_mutation'].mean()),
+        'ligand_mentioned': int(np.random.rand() < positive_rows['ligand_mentioned'].mean()),
+        'evidence_length': np.random.choice(positive_rows['evidence_length']),
+        'redundant': int(np.random.rand() < positive_rows['redundant'].mean()),
+        'subject_length': len(subj),
+        'object_length': len(obj),
+        'protein_pair_same_prefix': int(subj[:3] == obj[:3]),
+        'subject_in_evidence': 1,
+        'object_in_evidence': 1,
+        'subject_object_order_correct': 1,
+        'statement_type_binary': stype
+    }
+    synthetic_data.append(row)
+
+df_synth = pd.DataFrame(synthetic_data)
+
+# predict probability of STING support for synthetic interactions
+pred_probs = best_xgb.predict_proba(df_synth)[:, 1]
+df_synth['sting_predicted_prob'] = pred_probs
+
+# rank synthetic interactions by predicted probability
+df_synth_sorted = df_synth.sort_values('sting_predicted_prob', ascending=False)
+
+# show top 10 high-confidence synthetic interactions
+print(df_synth_sorted.head(10))
+
+output_path = '/Users/mendo/OneDrive/Desktop/Fruzs/simulation_results.csv'
+df_synth_sorted.to_csv(output_path, index=False)
+print(f"Top 10 synthetic interactions saved to {output_path}")
+
+This simulation creates new, synthetic protein-protein interaction pairs by randomly selecting unique subjects and objects from the existing dataset, while ensuring that self-interactions are skipped. For each synthetic pair, all feature values are generated in a realistic way: binary features like `contains_negation`, `has_condition`, or `redundant` are sampled using the empirical probability (mean) from the original data, and numeric features such as `evidence_length`, `subject_length`, and `object_length` are randomly chosen from the real value distributions in the dataset. The relationship type (`statement_type_binary`) is also sampled from real examples. This approach produces simulated interactions that more closely resemble the real biological data and allows the model to predict the likelihood (`sting_predicted_prob`) that each new interaction would be STING-supported. The results are then ranked and exported for further analysis.
+
+The prediction value (`sting_predicted_prob`) given by the model for each synthetic protein-protein interaction represents the estimated probability that this interaction would be considered “supported” by the STING database, based on the patterns learned from real data. In other words, it is a confidence score between 0 and 1 that reflects how closely the simulated interaction matches the feature profiles of known, biologically validated STING-supported interactions.
+
+A higher prediction value (closer to 1) means the model believes the interaction is very likely to be biologically plausible, while a lower value (closer to 0) suggests the model sees little similarity to real, validated interactions. These values are useful for prioritizing which new, hypothetical protein pairs might be most promising for further experimental investigation or research. However, it is important to note that these probabilities are only as reliable as the model’s ability to generalize and the quality of the features used for simulation.
+
+
+Although the simulation was improved by sampling all features from the STING-supported (positive) subset, the highest predicted probability for synthetic interactions is still only 55%. This is likely because the model is conservative or relies on subtle protein-pair relationships that the simulation cannot fully capture, so even positive-patterned synthetic examples do not closely resemble truly validated interactions according to the model.
+
+### Conclusion of the project
+
+This project demonstrated a machine learning approach to validating NLP-derived protein-protein interactions by training predictive models using STING as a biological reference. Through feature engineering, model selection, and evaluation—including cross-validation and bootstrap testing. Extended analyses, such as robustness testing and simulation of new interactions, provided insight into the model’s stability and its ability to generate novel hypotheses.
+
+Despite efforts to improve simulation realism, the model remained cautious in assigning high probabilities to new synthetic interactions, indicating an underlying complexity in biological data that was not fully captured by the available features. This outcome highlights both the value and the current limitations of machine learning for biological knowledge discovery: while the approach offers a scalable and interpretable framework for interaction validation, further advances in feature design, biological context, and data integration are needed to increase confidence in novel predictions. Overall, the project establishes a robust foundation for ongoing, data-driven hypothesis generation in systems biology.
