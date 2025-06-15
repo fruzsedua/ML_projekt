@@ -1,0 +1,9 @@
+pandas
+numpy
+scikit-learn
+imbalanced-learn
+xgboost
+shap
+matplotlib
+requests
+indra @ git+https://github.com/sorgerlab/indra.git
